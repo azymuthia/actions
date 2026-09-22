@@ -1,0 +1,62 @@
+name: Registry login via Doppler
+description: >-
+  Log the runner's Docker daemon in to a container registry, using a username
+  and password held in Doppler rather than in GitHub Actions secrets.
+
+inputs:
+  registry:
+    description: Registry hostname, e.g. registry.example.com
+    required: true
+  doppler-token:
+    description: >-
+      Doppler service token scoped to the project/config holding the
+      credentials. This is normally NOT the token an application repository
+      uses for its own secrets.
+    required: true
+  project:
+    description: Doppler project holding the credentials
+    required: true
+  config:
+    description: Doppler config holding the credentials
+    required: true
+  username-secret:
+    description: Name of the Doppler secret holding the registry username
+    required: false
+    default: REGISTRY_USERNAME
+  password-secret:
+    description: Name of the Doppler secret holding the registry password
+    required: false
+    default: REGISTRY_PASSWORD
+
+runs:
+  using: composite
+  steps:
+    - name: Install Doppler CLI
+      uses: dopplerhq/cli-action@v3
+
+    - name: Log in to ${{ inputs.registry }}
+      shell: bash
+      env:
+        DOPPLER_TOKEN: ${{ inputs.doppler-token }}
+        REGISTRY: ${{ inputs.registry }}
+        DOPPLER_PROJECT_INPUT: ${{ inputs.project }}
+        DOPPLER_CONFIG_INPUT: ${{ inputs.config }}
+        USERNAME_SECRET: ${{ inputs.username-secret }}
+        PASSWORD_SECRET: ${{ inputs.password-secret }}
+      run: |
+        set -euo pipefail
+
+        # `doppler secrets get` rather than `doppler run`: the latter would
+        # inject every secret in the config into this step just to read two of
+        # them.
+        #
+        # The password is piped straight into --password-stdin and never lands
+        # in a shell variable, so it cannot be echoed by a later `set -x`, an
+        # error path, or a crash dump.
+        doppler secrets get "$PASSWORD_SECRET" --plain \
+            --project "$DOPPLER_PROJECT_INPUT" --config "$DOPPLER_CONFIG_INPUT" \
+          | docker login "$REGISTRY" \
+              --username "$(doppler secrets get "$USERNAME_SECRET" --plain \
+                              --project "$DOPPLER_PROJECT_INPUT" \
+                              --config "$DOPPLER_CONFIG_INPUT")" \
+              --password-stdin
