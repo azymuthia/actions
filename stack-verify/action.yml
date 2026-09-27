@@ -1,0 +1,19 @@
+name: Verify a Swarm stack
+description: >-
+  Fail the job when any service in a Docker Swarm stack ended its last update
+  paused or rolled back. Run it right after `docker stack deploy
+  --detach=false`, which exits 0 even when Swarm rolled the update back.
+
+inputs:
+  stack:
+    description: Stack name, as passed to docker stack deploy
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Verify ${{ inputs.stack }}
+      shell: bash
+      env:
+        STACK: ${{ inputs.stack }}
+      run: '"$GITHUB_ACTION_PATH/verify.sh" "$STACK"'

@@ -1,0 +1,53 @@
+name: Test stack-verify
+
+on:
+  push:
+    paths:
+      - stack-verify/**
+      - .github/workflows/test-stack-verify.yaml
+  pull_request:
+    paths:
+      - stack-verify/**
+      - .github/workflows/test-stack-verify.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Start a single-node swarm
+        run: docker swarm init
+
+      # Covers verify.sh on a completed, a rolled-back, a paused and a missing
+      # stack, and asserts that `docker stack deploy --detach=false` exits 0
+      # after a rollback - the reason this action exists.
+      - name: Run the verify.sh self-test
+        run: stack-verify/test/run.sh
+
+      # The same checks through action.yml, against the stacks run.sh left.
+      - name: Action passes a completed update
+        uses: ./stack-verify
+        with:
+          stack: sv-good
+
+      - name: Action fails a rolled-back update
+        id: rolled-back
+        continue-on-error: true
+        uses: ./stack-verify
+        with:
+          stack: sv-rollback
+
+      - name: Check the rolled-back stack failed the action
+        env:
+          OUTCOME: ${{ steps.rolled-back.outcome }}
+        run: |
+          if [ "$OUTCOME" != failure ]; then
+            echo "::error::stack-verify outcome on sv-rollback was $OUTCOME, expected failure"
+            exit 1
+          fi

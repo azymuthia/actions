@@ -49,6 +49,58 @@ Docker credentials live in the daemon's config on the runner, so a login in
 one job is not guaranteed to be visible to the next. Call this in each job
 that pushes, pulls, or runs `docker stack deploy --with-registry-auth`.
 
+## `stack-verify`
+
+Fails the job when any service in a Docker Swarm stack ended its last update
+paused or rolled back. Call it right after the deploy, and give the job a
+timeout, because `--detach=false` waits for the stack to converge:
+
+```yaml
+deploy:
+  runs-on: kiribati
+  timeout-minutes: 15
+  steps:
+    - name: Deploy stack
+      run: docker stack deploy --detach=false --with-registry-auth -c docker-compose.prod.yaml "$STACK_NAME"
+
+    - name: Verify stack
+      uses: azymuthia/actions/stack-verify@v1
+      with:
+        stack: ${{ env.STACK_NAME }}
+```
+
+| Input | Required | Default | Notes |
+|---|---|---|---|
+| `stack` | yes | — | Stack name, as passed to `docker stack deploy` |
+
+It fails on a stack with no services too, which usually means a wrong name.
+The runner has to be a Swarm manager, which it already is if it can deploy.
+
+### Why `--detach=false` alone is not enough
+
+Without `--detach=false`, `docker stack deploy` returns as soon as the update
+is submitted, and nothing waits for the result. With it, the command waits,
+and it exits non-zero when an update **pauses** (`failure_action: pause`). But
+when Swarm **rolls back** (`failure_action: rollback`), it prints a `rollback`
+line and exits **0** once the old tasks are running again. The run stays green
+while the new image never started. docker/cli
+`cli/command/service/progress/progress.go::ServiceProgress` treats
+`rollback_completed` as a message, not an error.
+
+This action reads each service's `UpdateStatus.State` afterwards and fails on
+`paused`, `rollback_started`, `rollback_paused` or `rollback_completed`. It
+prints Swarm's message and the service's most recent stopped tasks, with their
+errors. `stack-verify/test/run.sh` proves both behaviours on a real swarm. The
+`Test stack-verify` workflow runs it.
+
+### Known edge case
+
+It checks every service in the stack, not only the ones this deploy updated.
+Say a service's update rolled back, and its compose entry was later reverted
+to the spec it rolled back to. Then the next deploy doesn't touch that service,
+and it still reports `rollback_completed`. Clear that with
+`docker service update --force <service>`.
+
 ## Versioning
 
 Consumers pin the `v1` tag, which moves to the latest compatible commit.
