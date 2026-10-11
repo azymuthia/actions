@@ -14,11 +14,17 @@ inputs:
       uses for its own secrets.
     required: true
   project:
-    description: Doppler project holding the credentials
-    required: true
+    description: >-
+      Doppler project holding the credentials. Leave both project and config
+      empty to read the service token's own config.
+    required: false
+    default: ''
   config:
-    description: Doppler config holding the credentials
-    required: true
+    description: >-
+      Doppler config holding the credentials. Leave both project and config
+      empty to read the service token's own config.
+    required: false
+    default: ''
   username-secret:
     description: Name of the Doppler secret holding the registry username
     required: false
@@ -31,12 +37,53 @@ inputs:
 runs:
   using: composite
   steps:
+    # Not dopplerhq/cli-action: its v4.0.1 (4819d808ab99e5cde19a0637a16536a4038fad73)
+    # takes no inputs, always installs into $GITHUB_WORKSPACE/bin, the caller's
+    # checkout, and puts that directory first on PATH, and it installs whatever
+    # CLI cli.doppler.com serves that day. This installs one pinned release,
+    # checked against its SHA-256, into a directory of its own under
+    # $RUNNER_TEMP, which the runner empties for every job.
     - name: Install Doppler CLI
-      uses: dopplerhq/cli-action@v4
+      id: doppler-cli
+      shell: bash
+      env:
+        DOPPLER_CLI_VERSION: 3.77.0
+      run: |
+        set -euo pipefail
+
+        # From the release's checksums.txt, whose signature verifies against
+        # DopplerHQ's key B70BD7FCA460C4A3D0EEB965D3D593D50EE79DEC. Change the
+        # version and both checksums together.
+        case "$RUNNER_OS/$RUNNER_ARCH" in
+          Linux/X64)   arch=amd64 sha256=92587cb89c2ff82fc2ddec2b2a9f275ff320994a44e16cd9310b55a429a82084 ;;
+          Linux/ARM64) arch=arm64 sha256=3aa603d60bc8502ec67d9a57e917925f357ac2822eead484acda3875fe6a4d95 ;;
+          *)
+            echo "::error::registry-login runs on Linux X64 and ARM64 runners, not $RUNNER_OS/$RUNNER_ARCH"
+            exit 1
+            ;;
+        esac
+
+        dir=$(mktemp -d "$RUNNER_TEMP/doppler-cli.XXXXXX")
+        archive="$dir/doppler.tar.gz"
+        url="https://github.com/DopplerHQ/cli/releases/download/$DOPPLER_CLI_VERSION/doppler_${DOPPLER_CLI_VERSION}_linux_$arch.tar.gz"
+        if command -v curl >/dev/null; then
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --output "$archive" "$url"
+        else
+          wget --quiet --tries=3 --output-document="$archive" "$url"
+        fi
+        echo "$sha256  $archive" | sha256sum --check --quiet -
+        tar -xzf "$archive" -C "$dir" doppler
+        rm "$archive"
+
+        echo "Installed Doppler CLI $("$dir/doppler" --version) to $dir"
+        echo "path=$dir/doppler" >> "$GITHUB_OUTPUT"
+        # cli-action left `doppler` on PATH for the caller's later steps; so does this.
+        echo "$dir" >> "$GITHUB_PATH"
 
     - name: Log in to ${{ inputs.registry }}
       shell: bash
       env:
+        DOPPLER: ${{ steps.doppler-cli.outputs.path }}
         DOPPLER_TOKEN: ${{ inputs.doppler-token }}
         REGISTRY: ${{ inputs.registry }}
         DOPPLER_PROJECT_INPUT: ${{ inputs.project }}
@@ -46,6 +93,20 @@ runs:
       run: |
         set -euo pipefail
 
+        if [ -z "$DOPPLER_TOKEN" ]; then
+          echo "::error::doppler-token is empty"
+          exit 1
+        fi
+
+        # Only the token and the inputs choose what is read. Without this, an
+        # empty project or config would fall back to DOPPLER_PROJECT or
+        # DOPPLER_CONFIG (or their ENCLAVE_ forms) from the caller's job, or
+        # to a token or scope saved in the runner user's ~/.doppler.
+        unset DOPPLER_PROJECT DOPPLER_CONFIG ENCLAVE_PROJECT ENCLAVE_CONFIG
+        flags=(--plain --no-check-version --config-dir "$(mktemp -d "$RUNNER_TEMP/doppler-config.XXXXXX")")
+        if [ -n "$DOPPLER_PROJECT_INPUT" ]; then flags+=(--project "$DOPPLER_PROJECT_INPUT"); fi
+        if [ -n "$DOPPLER_CONFIG_INPUT" ]; then flags+=(--config "$DOPPLER_CONFIG_INPUT"); fi
+
         # `doppler secrets get` rather than `doppler run`: the latter would
         # inject every secret in the config into this step just to read two of
         # them.
@@ -53,10 +114,7 @@ runs:
         # The password is piped straight into --password-stdin and never lands
         # in a shell variable, so it cannot be echoed by a later `set -x`, an
         # error path, or a crash dump.
-        doppler secrets get "$PASSWORD_SECRET" --plain \
-            --project "$DOPPLER_PROJECT_INPUT" --config "$DOPPLER_CONFIG_INPUT" \
+        "$DOPPLER" secrets get "$PASSWORD_SECRET" "${flags[@]}" \
           | docker login "$REGISTRY" \
-              --username "$(doppler secrets get "$USERNAME_SECRET" --plain \
-                              --project "$DOPPLER_PROJECT_INPUT" \
-                              --config "$DOPPLER_CONFIG_INPUT")" \
+              --username "$("$DOPPLER" secrets get "$USERNAME_SECRET" "${flags[@]}")" \
               --password-stdin

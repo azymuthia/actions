@@ -30,10 +30,37 @@ held in Doppler.
 |---|---|---|---|
 | `registry` | yes | — | Registry hostname |
 | `doppler-token` | yes | — | Service token for the config below |
-| `project` | yes | — | Doppler project |
-| `config` | yes | — | Doppler config |
+| `project` | no | — | Doppler project |
+| `config` | no | — | Doppler config |
 | `username-secret` | no | `REGISTRY_USERNAME` | Doppler secret name |
 | `password-secret` | no | `REGISTRY_PASSWORD` | Doppler secret name |
+
+Leave out both `project` and `config` to read the service token's own
+config. A caller written that way keeps working when its token is swapped
+for one on a different config, such as a config that holds only the registry
+credentials. Passing a config the token cannot read fails the login.
+
+### The Doppler CLI
+
+The action installs Doppler CLI 3.77.0 from its GitHub release, checks the
+archive against the SHA-256 recorded in `action.yml`, and unpacks it into a
+directory of its own under `$RUNNER_TEMP`, which it also adds to `PATH`. It
+runs on Linux X64 and ARM64 runners only. It does not use
+`dopplerhq/cli-action`: that action has no inputs, installs into the caller's
+checkout (`$GITHUB_WORKSPACE/bin`), and installs whichever CLI release is
+current that day.
+
+To move to another CLI release, change the version and both checksums
+together. Take the checksums from the release's `checksums.txt` after
+checking `checksums.txt.sig` against DopplerHQ's key
+`B70BD7FCA460C4A3D0EEB965D3D593D50EE79DEC`.
+
+### No logout
+
+The login stays in the runner user's Docker config after the job. A
+composite action has no post step, and logging out before it returns would
+undo the login its caller's next steps need. On a shared self-hosted runner,
+end the job with `docker logout <registry>` under `if: always()`.
 
 ### Why not a local composite action
 
