@@ -42,7 +42,9 @@ runs:
     # checkout, and puts that directory first on PATH, and it installs whatever
     # CLI cli.doppler.com serves that day. This installs one pinned release,
     # checked against its SHA-256, into a directory of its own under
-    # $RUNNER_TEMP, which the runner empties for every job.
+    # $RUNNER_TEMP, which the runner empties for every job. The downloaded
+    # archive is kept in $RUNNER_TOOL_CACHE, so a job downloads it only when
+    # the cache lacks it or holds a file that fails the check.
     - name: Install Doppler CLI
       id: doppler-cli
       shell: bash
@@ -63,15 +65,48 @@ runs:
             ;;
         esac
 
+        verify() { echo "$sha256  $1" | sha256sum --check --quiet -; }
+
+        # The archive is kept in the runner's tool cache, one per version and
+        # architecture. Every use copies it into the job's own directory and
+        # checks the copy against the pinned SHA-256 before unpacking it, so a
+        # cached file that was changed, cut short or replaced is never run: it
+        # is downloaded again and the cache is overwritten.
         dir=$(mktemp -d "$RUNNER_TEMP/doppler-cli.XXXXXX")
         archive="$dir/doppler.tar.gz"
-        url="https://github.com/DopplerHQ/cli/releases/download/$DOPPLER_CLI_VERSION/doppler_${DOPPLER_CLI_VERSION}_linux_$arch.tar.gz"
-        if command -v curl >/dev/null; then
-          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --output "$archive" "$url"
+        cache_dir="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/doppler/$DOPPLER_CLI_VERSION/$arch"
+        cached="$cache_dir/doppler.tar.gz"
+
+        if [ -f "$cached" ] && cp "$cached" "$archive" && verify "$archive"; then
+          echo "Doppler CLI $DOPPLER_CLI_VERSION: using the archive in the tool cache ($cached)"
         else
-          wget --quiet --tries=3 --output-document="$archive" "$url"
+          if [ -e "$cached" ]; then
+            echo "::warning::The cached Doppler CLI archive failed its SHA-256 check; downloading it again"
+          fi
+          rm -f "$archive"
+          url="https://github.com/DopplerHQ/cli/releases/download/$DOPPLER_CLI_VERSION/doppler_${DOPPLER_CLI_VERSION}_linux_$arch.tar.gz"
+          # GitHub's release downloads fail now and then with a 504; retry for
+          # up to two minutes before giving up.
+          if command -v curl >/dev/null; then
+            curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+              --retry 6 --retry-delay 5 --retry-max-time 120 --output "$archive" "$url"
+          else
+            wget --quiet --tries=6 --waitretry=5 --output-document="$archive" "$url"
+          fi
+          verify "$archive"
+
+          # Keep it for the next job. A cache that cannot be written (read-only,
+          # full) costs only that download, so it does not fail the step. The
+          # copy is renamed into place, so a job that starts meanwhile never
+          # reads a half-written file.
+          if mkdir -p "$cache_dir" && tmp=$(mktemp "$cache_dir/download.XXXXXX") \
+            && cp "$archive" "$tmp" && mv -f "$tmp" "$cached"; then
+            echo "Doppler CLI $DOPPLER_CLI_VERSION: downloaded and kept in the tool cache ($cached)"
+          else
+            echo "::warning::Could not keep the Doppler CLI archive in $cache_dir"
+            rm -f "${tmp:-}"
+          fi
         fi
-        echo "$sha256  $archive" | sha256sum --check --quiet -
         tar -xzf "$archive" -C "$dir" doppler
         rm "$archive"
 

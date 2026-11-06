@@ -45,7 +45,17 @@ credentials. Passing a config the token cannot read fails the login.
 The action installs Doppler CLI 3.77.0 from its GitHub release, checks the
 archive against the SHA-256 recorded in `action.yml`, and unpacks it into a
 directory of its own under `$RUNNER_TEMP`, which it also adds to `PATH`. It
-runs on Linux X64 and ARM64 runners only. It does not use
+runs on Linux X64 and ARM64 runners only.
+
+The downloaded archive is kept in `$RUNNER_TOOL_CACHE/doppler/<version>/<arch>/`
+(`$RUNNER_TEMP` if the runner sets no tool cache). Each use copies it into the
+job's directory and checks the copy against the same SHA-256 before unpacking
+it; a missing or mismatched cached file is downloaded again and overwritten,
+never run. The download retries six times, five seconds apart, for up to two
+minutes, which rides out GitHub's occasional 504s. A cache that cannot be
+written only costs the next job a download.
+
+The action does not use
 `dopplerhq/cli-action`: that action has no inputs, installs into the caller's
 checkout (`$GITHUB_WORKSPACE/bin`), and installs whichever CLI release is
 current that day.
